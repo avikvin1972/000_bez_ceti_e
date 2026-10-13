@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Лаборатория исчезающей кнопки</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; align-items: center; justify-content: center; background: #f4f4f6; font-family: system-ui, sans-serif; color: #222; }
+  #btn { position: fixed; top: 18vh; left: 50%; transform: translateX(-50%); font-size: 22px; padding: 22px 44px; border: 0; border-radius: 14px; background: #3b6fe0; color: #fff; touch-action: manipulation; user-select: none; }
+  #btn.gone { visibility: hidden; pointer-events: none; }
+  #video { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+  #gear { position: fixed; right: 10px; top: 10px; width: 40px; height: 40px; border: 0; border-radius: 20px; background: #ddd; font-size: 20px; opacity: .45; }
+  #panel { position: fixed; left: 0; right: 0; bottom: 0; max-height: 58vh; overflow-y: auto; background: rgba(255,255,255,.96); box-shadow: 0 -1px 4px rgba(0,0,0,.15); font-size: 13px; color: #444; }
+  #head { position: sticky; top: 0; background: #fff; padding: 8px 12px 6px; z-index: 2; border-bottom: 1px solid #ddd; }
+  #status { white-space: pre-line; margin-bottom: 5px; }
+  .bar { position: relative; height: 16px; border-radius: 4px; background: #e3e3e8; overflow: hidden; }
+  .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #2a7de1; }
+  .mark { position: absolute; top: 0; bottom: 0; width: 2px; background: #d9534f; }
+  #body { padding: 4px 12px 14px; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 5px 0; }
+  .row .lb { flex: 0 0 38%; }
+  .row input[type=range] { flex: 1; min-width: 0; }
+  .row .val { flex: 0 0 44px; text-align: right; }
+  .feat { display: grid; grid-template-columns: 24px 1fr 90px; gap: 4px 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid #eee; }
+  .feat .zb { grid-column: 2 / 4; height: 6px; background: #e3e3e8; border-radius: 3px; overflow: hidden; }
+  .feat .zb i { display: block; height: 100%; width: 0; background: #2a7de1; }
+  .feat small { grid-column: 2 / 4; color: #888; }
+  details { margin-top: 6px; } summary { padding: 7px 0; font-weight: 600; }
+  select, button.b { font-size: 13px; padding: 7px 9px; border: 0; border-radius: 8px; background: #777; color: #fff; }
+  select { background: #eee; color: #222; }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+<button id="btn">Нажми</button>
+<button id="gear">⚙</button>
+<div id="panel">
+  <div id="head">
+    <div id="status">Нажми кнопку — включится камера</div>
+    <div class="bar"><div class="fill" id="fill"></div><div class="mark" id="mark"></div></div>
+  </div>
+  <div id="body"></div>
+</div>
+
+<script>
+/* =====================================================================
+   ЛАБОРАТОРИЯ. Каждый метод даёт свою оценку «насколько выше обычного» (z).
+   Включённые методы объединяются выбранным способом в общий счёт; счёт выше порога — кнопка прячется.
+   Выключенные методы всё равно считаются и показываются полосками, чтобы их можно было сравнивать.
+   Все параметры — ползунки внизу, сохраняются в браузере. После смены разрешения, фона, шума — «Перекалибровать».
+   ===================================================================== */
+// [группа, id, подпись, min, max, шаг, по умолчанию]
+const PARAMS = [
+['Общие','thr','Порог скрытия (счёт)',1,30,0.5,6],
+['Общие','hyst','Порог возврата, % от порога',10,100,5,50],
+['Общие','hi','Тиков подряд выше порога',1,10,1,3],
+['Общие','loMs','Спокойствие для возврата, мс',100,3000,100,500],
+['Общие','inst','Мгновенное скрытие, × порога',1,5,0.1,2],
+['Общие','maxHid','Макс. время скрытия, с',2,60,1,10],
+['Общие','maxZ','Потолок оценки признака',5,40,1,20],
+['Общие','second','Вес 2-го признака (режим «макс+2-й»)',0,1,0.1,0.5],
+['Общие','autoUp','Снижать порог при проскочившем нажатии',0,2,0.25,0],
+['Камера и калибровка','res','Разрешение: 0=16×12, 1=32×24, 2=64×48',0,2,1,1],
+['Камера и калибровка','calS','Калибровка, с',4,20,1,9],
+['Камера и калибровка','calSkip','Пропуск в начале калибровки, с',0,6,0.5,2.5],
+['Камера и калибровка','tick','Период расчёта, мс',16,100,1,33],
+['Камера и калибровка','muAdapt','Подстройка «обычного уровня», с',5,300,5,30],
+['Камера и калибровка','bgAdapt','Подстройка эталона фона, с',5,600,5,60],
+['Камера и калибровка','bSlow','Инерция «обычной» яркости, с',1,30,1,3],
+['Движение','lag','Сравнение с кадром N тиков назад',1,30,1,9],
+['Движение','pix','Порог изменения пикселя, %',1,30,1,6],
+['Движение','fl_move','Мин. разброс (доля кадра)',0.005,0.2,0.005,0.02],
+['Кожа','fl_skin','Мин. разброс',0.005,0.2,0.005,0.02],
+['Фон','fg','Порог пикселя от эталона, %',2,30,1,7],
+['Фон','sigK','Множитель шума пикселя',1,8,0.5,4],
+['Фон','nb','Соседей для «пятна» (0 = без фильтра)',0,6,1,2],
+['Фон','fl_fg','Мин. разброс',0.005,0.2,0.005,0.02],
+['Яркость','dark','Только затемнение (1) или любое (0)',0,1,1,0],
+['Яркость','fl_bright','Мин. разброс',0.002,0.1,0.002,0.01],
+['Края','edge','Ширина полосы у края (в клетках при 32)',1,8,1,4],
+['Края','fl_edge','Мин. разброс',0.01,0.3,0.01,0.05],
+['Пятно','fl_blob','Мин. разброс (доля кадра)',0.005,0.2,0.005,0.02],
+['Приближение','loomWin','Окно роста, тиков',3,30,1,10],
+['Приближение','fl_loom','Мин. разброс (доля кадра)',0.002,0.1,0.002,0.01],
+['Резкость','fl_sharp','Мин. разброс (лог. единицы)',0.02,1,0.02,0.15],
+['Поток','flowR','Радиус поиска смещения, клеток',1,4,1,2],
+['Поток','fl_flow','Мин. разброс (клетки)',0.05,2,0.05,0.3]
+];
+// [id, название, коротко, включён по умолчанию, пояснение]
+const FEATS = [
+['move','Движение','движ',1,'сколько пикселей изменилось за последние N тиков'],
+['skin','Кожа','кожа',1,'доля пикселей цвета кожи'],
+['fg','Фон','фон',1,'отличие от эталона пустой сцены (с поправкой на экспозицию)'],
+['bright','Яркость / тень','ярк',1,'скачок средней яркости'],
+['edge','Края кадра','край',1,'отличие от фона в полосах у 4 краёв (рука появляется там раньше)'],
+['blob','Размер пятна','пятно',0,'площадь самого большого пятна «не фона»'],
+['loom','Приближение','прибл',0,'рост площади «не фона» за окно (looming)'],
+['sharp','Размытость','резк',0,'падение резкости кадра (рука ближе фокуса)'],
+['flow','Поток смещения','поток',0,'блочный оптический поток: быстрые блоки минус общее дрожание']
+];
+const P = {};
+PARAMS.forEach(p => P[p[1]] = p[6]);
+FEATS.forEach(f => { P['en_' + f[0]] = f[3]; P['w_' + f[0]] = 1; });
+P.mode = 0; P.cam = 0;
+try { Object.assign(P, JSON.parse(localStorage.getItem('lab_v1') || '{}')); } catch (e) {}
+const save = () => { try { localStorage.setItem('lab_v1', JSON.stringify(P)); } catch (e) {} };
+
+const SZ = [[16,12],[32,24],[64,48]];
+let W, H, N, K, EX, EY, bg, nz, sh, thrF, fgMask, fgClean, motionMask, fitW;
+function init() {
+  [W, H] = SZ[P.res]; N = W * H; K = 128 / W;
+  EX = Math.max(1, Math.round(P.edge * W / 32)); EY = Math.max(1, Math.round(EX * 0.75));
+  bg = new Float32Array(N); nz = new Float32Array(N); sh = new Float32Array(N);
+  thrF = new Float32Array(N).fill(P.fg / 100);
+  fgMask = new Uint8Array(N); fgClean = new Uint8Array(N); motionMask = new Uint8Array(N); fitW = new Uint8Array(N);
+  bgReady = false;
+}
+const rebuildThr = () => { for (let i = 0; i < N; i++) thrF[i] = Math.min(0.3, Math.max(P.fg / 100, P.sigK * nz[i], 2 * sh[i])); };
+
+const video = document.getElementById('video'), btn = document.getElementById('btn');
+const midC = document.createElement('canvas'); midC.width = 128; midC.height = 96;
+const midX = midC.getContext('2d', { willReadFrequently: true }); midX.imageSmoothingQuality = 'high';
+const g128 = new Float32Array(128 * 96);
+
+let camOn = false, state = 'off', phase = 0, calStart = 0, bgReady = false;
+let cal = { f1: [], f2: [] }, lists = {}, mu = {}, sdv = {}, hist = [], fHist = [];
+let slowMean = null, hidden = false, hiddenSince = 0, holdoffUntil = 0, hiCount = 0, loCount = 0;
+let zv = {}, score = 0, holdName = '', note = '', noteUntil = 0, wake = null, lastRender = 0, loop = null, stream = null;
+let F0 = 0;
+
+const mean = a => a.reduce((s, v) => s + v, 0) / (a.length || 1);
+const std = a => { const m = mean(a); return Math.sqrt(mean(a.map(v => (v - m) * (v - m)))); };
+const avg = g => { let s = 0; for (let i = 0; i < g.length; i++) s += g[i]; return s / g.length; };
+const clipZ = z => Math.max(0, Math.min(P.maxZ, z));
+
+// Кадр -> яркости клеток (усреднение блоков K×K), доля кожи, резкость (дисперсия лапласиана на 128×96)
+function grab() {
+  midX.drawImage(video, 0, 0, 128, 96);
+  const d = midX.getImageData(0, 0, 128, 96).data;
+  for (let i = 0; i < 12288; i++) g128[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  const gray = new Float32Array(N), k2 = K * K; let skin = 0;
+  for (let cy = 0; cy < H; cy++) for (let cx = 0; cx < W; cx++) {
+    let r = 0, g = 0, b = 0;
+    for (let dy = 0; dy < K; dy++) for (let dx = 0; dx < K; dx++) { const o = ((cy * K + dy) * 128 + cx * K + dx) * 4; r += d[o]; g += d[o + 1]; b += d[o + 2]; }
+    r /= k2; g /= k2; b /= k2;
+    const y = 0.299 * r + 0.587 * g + 0.114 * b;
+    gray[cy * W + cx] = y / 255;
+    const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b, cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+    if (y > 40 && cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173 && r > g && r > b) skin++;
+  }
+  let s = 0, s2 = 0, c = 0;
+  for (let y = 1; y < 95; y++) for (let x = 1; x < 127; x++) {
+    const i = y * 128 + x, l = 4 * g128[i] - g128[i - 1] - g128[i + 1] - g128[i - 128] - g128[i + 128];
+    s += l; s2 += l * l; c++;
+  }
+  return { gray, skin: skin / N, sharp: s2 / c - (s / c) * (s / c) };
+}
+
+// Подгонка кадра под эталон по яркости и контрасту (gray ≈ a·ref + b); выбросы (рука) отбрасываются.
+function fitGain(gray, ref, thr) {
+  fitW.fill(1);
+  let a = 1, b = 0;
+  for (let it = 0; it < 3; it++) {
+    let sw = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (let i = 0; i < N; i++) if (fitW[i]) { const x = ref[i], y = gray[i]; sw++; sx += x; sy += y; sxx += x * x; sxy += x * y; }
+    const den = sw * sxx - sx * sx;
+    if (sw < N * 0.3 || den < 1e-6) break;
+    a = Math.max(0.5, Math.min(2, (sw * sxy - sx * sy) / den));
+    b = (sy - a * sx) / sw;
+    for (let i = 0; i < N; i++) fitW[i] = Math.abs(gray[i] - (a * ref[i] + b)) < 1.5 * (thr.length ? thr[i] : thr) ? 1 : 0;
+  }
+  return [a, b];
+}
+// Оставляем только пиксели, у которых есть минимум nb соседей; считает их и (если out) помечает.
+function cluster(mask, out) {
+  if (out) out.fill(0);
+  let c = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (!mask[y * W + x]) continue;
+    let n = 0;
+    if (P.nb > 0) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const xx = x + dx, yy = y + dy;
+      if (xx >= 0 && xx < W && yy >= 0 && yy < H && mask[yy * W + xx]) n++;
+    }
+    if (P.nb === 0 || n >= P.nb) { c++; if (out) out[y * W + x] = 1; }
+  }
+  return c;
+}
+function edgeFrac(k) {
+  let l = 0, r = 0, t = 0, b = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (k[y * W + x]) {
+    if (x < EX) l++; if (x >= W - EX) r++; if (y < EY) t++; if (y >= H - EY) b++;
+  }
+  return [l / (EX * H), r / (EX * H), t / (EY * W), b / (EY * W)];
+}
+function largestBlob(mask) {
+  const seen = new Uint8Array(N), st = []; let best = 0;
+  for (let s = 0; s < N; s++) {
+    if (!mask[s] || seen[s]) continue;
+    let a = 0; st.push(s); seen[s] = 1;
+    while (st.length) {
+      const i = st.pop(); a++;
+      const x = i % W, y = (i / W) | 0, nb = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1];
+      for (const j of nb) if (j >= 0 && mask[j] && !seen[j]) { seen[j] = 1; st.push(j); }
+    }
+    best = Math.max(best, a);
+  }
+  return best / N;
+}
+// Блочный оптический поток: блоки 4×4 клетки, поиск смещения ±R по сумме модулей разностей (без средней яркости).
+function flowVal(g, p) {
+  if (!p) return 0;
+  const BS = 4, R = P.flowR, mags = [];
+  for (let by = 0; by + BS <= H; by += BS) for (let bx = 0; bx + BS <= W; bx += BS) {
+    let mc = 0;
+    for (let j = 0; j < BS; j++) for (let i = 0; i < BS; i++) mc += g[(by + j) * W + bx + i];
+    mc /= BS * BS;
+    let contrast = 0;
+    for (let j = 0; j < BS; j++) for (let i = 0; i < BS; i++) contrast += Math.abs(g[(by + j) * W + bx + i] - mc);
+    if (contrast < 0.03 * BS * BS) continue;   // плоский блок: смещение не определить
+    let best = 1e9, bm = 0;
+    for (let ring = 0; ring <= R; ring++) for (let dy = -ring; dy <= ring; dy++) for (let dx = -ring; dx <= ring; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
+      const x0 = bx + dx, y0 = by + dy;
+      if (x0 < 0 || y0 < 0 || x0 + BS > W || y0 + BS > H) continue;
+      let mp = 0;
+      for (let j = 0; j < BS; j++) for (let i = 0; i < BS; i++) mp += p[(y0 + j) * W + x0 + i];
+      mp /= BS * BS;
+      let sad = 0;
+      for (let j = 0; j < BS; j++) for (let i = 0; i < BS; i++) sad += Math.abs((g[(by + j) * W + bx + i] - mc) - (p[(y0 + j) * W + x0 + i] - mp));
+      if (sad < best - 1e-6) { best = sad; bm = Math.hypot(dx, dy); }
+    }
+    mags.push(bm);
+  }
+  if (!mags.length) return 0;
+  mags.sort((a, b) => a - b);
+  return mags[Math.floor(mags.length * 0.9)] - mags[mags.length >> 1];   // быстрые блоки минус общий сдвиг (дрожание камеры)
+}
+
+// Все признаки за один кадр. Каждый — массив значений (у «краёв» их 4).
+function measure(f, prev) {
+  const g = f.gray, m = avg(g), r = {};
+  if (prev) {
+    const gp = fitGain(g, prev, P.pix / 100);
+    for (let i = 0; i < N; i++) motionMask[i] = Math.abs(g[i] - (gp[0] * prev[i] + gp[1])) > P.pix / 100 ? 1 : 0;
+    r.move = [cluster(motionMask) / N];
+  } else r.move = [0];
+  r.skin = [f.skin];
+  if (slowMean === null) slowMean = m;
+  const dm = m - slowMean;
+  r.bright = [P.dark ? Math.max(0, -dm) : Math.abs(dm)];
+  r.sharp = [-Math.log(f.sharp + 1e-6)];
+  r.flow = [flowVal(g, prev)];
+  if (bgReady) {
+    const gb = fitGain(g, bg, thrF);
+    for (let i = 0; i < N; i++) fgMask[i] = Math.abs(g[i] - (gb[0] * bg[i] + gb[1])) > thrF[i] ? 1 : 0;
+    const c = cluster(fgMask, fgClean), F = c / N;
+    r.fg = [F]; r.edge = edgeFrac(fgClean); r.blob = [largestBlob(fgClean)];
+    fHist.push(F); while (fHist.length > P.loomWin + 1) fHist.shift();
+    r.loom = [Math.max(0, F - fHist[0])]; F0 = F;
+  } else { r.fg = [0]; r.edge = [0, 0, 0, 0]; r.blob = [0]; r.loom = [0]; }
+  return r;
+}
+
+function buildBg(frames) {
+  const b = new Float32Array(N);
+  for (const g of frames) for (let i = 0; i < N; i++) b[i] += g[i] / frames.length;
+  return b;
+}
+function pixNoise(frames, b) {
+  const out = new Float32Array(N);
+  for (const g of frames) {
+    const f = fitGain(g, b, P.fg / 100);
+    for (let i = 0; i < N; i++) { const d = g[i] - (f[0] * b[i] + f[1]); out[i] += d * d; }
+  }
+  for (let i = 0; i < N; i++) out[i] = Math.sqrt(out[i] / frames.length);
+  return out;
+}
+const setHidden = (v, t) => { hidden = v; hiddenSince = t; btn.classList.toggle('gone', v); };
+function flash(t) { note = t; noteUntil = performance.now() + 3000; }
+
+function startCalibration() {
+  state = 'cal'; phase = 0; calStart = 0; bgReady = false;
+  cal = { f1: [], f2: [] }; lists = {}; hist = []; fHist = []; slowMean = null; hiCount = loCount = 0;
+  setHidden(false, performance.now());
+}
+function beginPhase1(f) {
+  // Первая половина калибровки строит эталон, на второй меряем «обычный уровень» признаков:
+  // так в него входит дрейф камеры, а не только шум.
+  if (!cal.f1.length) cal.f1.push(f.gray);
+  bg = buildBg(cal.f1); nz = pixNoise(cal.f1, bg); sh.fill(0); rebuildThr();
+  bgReady = true; phase = 1; fHist = []; FEATS.forEach(x => lists[x[0]] = []);
+}
+function finishCalibration() {
+  const f2 = cal.f2.length ? cal.f2 : cal.f1;
+  const bg2 = buildBg(f2), n2 = pixNoise(f2, bg2), gb = fitGain(bg2, bg, P.fg / 100);
+  for (let i = 0; i < N; i++) sh[i] = Math.abs(bg2[i] - (gb[0] * bg[i] + gb[1]));
+  nz = n2; bg = bg2; rebuildThr();
+  FEATS.forEach(([id]) => {
+    const L = lists[id]; if (!L.length) { mu[id] = [0]; sdv[id] = [0]; return; }
+    mu[id] = []; sdv[id] = [];
+    for (let k = 0; k < L[0].length; k++) { const a = L.map(v => v[k]); mu[id][k] = mean(a); sdv[id][k] = std(a); }
+  });
+  cal = { f1: [], f2: [] }; state = 'run'; hiCount = loCount = 0;
+  holdoffUntil = performance.now() + 1500;
+}
+
+const thrOn = () => P.thr, thrOff = () => P.thr * P.hyst / 100;
+function combine(zs) {
+  if (!zs.length) return 0;
+  if (P.mode === 1) return Math.max(...zs);
+  if (P.mode === 2) return zs.reduce((a, b) => a + b, 0);
+  if (P.mode === 3) return mean(zs);
+  const s = zs.slice().sort((a, b) => b - a);
+  return s[0] + P.second * (s[1] || 0);
+}
+
+function step() {
+  if (!camOn || video.readyState < 2) { render(); return; }
+  const now = performance.now(), f = grab();
+  hist.push(f.gray); while (hist.length > P.lag + 1) hist.shift();
+  const prev = hist.length > 1 ? hist[0] : null, m = avg(f.gray);
+  const slowRate = P.tick / (P.bSlow * 1000);
+
+  if (state === 'cal') {
+    if (!calStart) calStart = now;
+    const el = (now - calStart) / 1000, mid = P.calSkip + (P.calS - P.calSkip) / 2;
+    if (slowMean === null) slowMean = m;
+    if (phase === 0) {
+      if (el > P.calSkip) cal.f1.push(f.gray);
+      if (el >= mid) beginPhase1(f);
+    } else {
+      const r = measure(f, prev);
+      FEATS.forEach(([id]) => lists[id].push(r[id]));
+      cal.f2.push(f.gray);
+      if (el >= P.calS) finishCalibration();
+    }
+    slowMean += slowRate * (m - slowMean);
+  } else if (state === 'run') {
+    const r = measure(f, prev), zs = [], names = [];
+    FEATS.forEach(([id, name, short]) => {
+      let z = 0;
+      for (let k = 0; k < r[id].length; k++) z = Math.max(z, clipZ((r[id][k] - mu[id][k]) / Math.max(sdv[id][k], P['fl_' + id])));
+      zv[id] = z;
+      if (P['en_' + id]) { zs.push(z * P['w_' + id]); names.push(short); }
+    });
+    score = combine(zs);
+    const mx = Math.max(...zs, 0); holdName = names[zs.indexOf(mx)] || '';
+
+    if (score > thrOn()) { hiCount++; loCount = 0; }
+    else { hiCount = 0; loCount = score < thrOff() ? loCount + 1 : Math.max(0, loCount - 1); }
+    const loNeed = Math.round(P.loMs / P.tick);
+    if (!hidden && now >= holdoffUntil && (hiCount >= P.hi || score > thrOn() * P.inst)) setHidden(true, now);
+    else if (hidden && loCount >= loNeed) setHidden(false, now);
+    if (hidden && now - hiddenSince > P.maxHid * 1000) {
+      setHidden(false, now); holdoffUntil = now + 2500; hiCount = 0;
+      bg.set(f.gray);   // залипло — считаем текущую сцену новым эталоном
+      flash('Кнопка пряталась слишком долго и вернулась (эталон сброшен).');
+    }
+    const calm = !hidden && score < thrOn() * 0.5;
+    slowMean += (calm ? slowRate : slowRate * 0.4) * (m - slowMean);
+    if (calm) {
+      const a = P.tick / (P.muAdapt * 1000), b = P.tick / (P.bgAdapt * 1000);
+      FEATS.forEach(([id]) => { for (let k = 0; k < r[id].length; k++) mu[id][k] += a * (r[id][k] - mu[id][k]); });
+      for (let i = 0; i < N; i++) bg[i] += (fgMask[i] ? b * 0.1 : b) * (f.gray[i] - bg[i]);
+    }
+  }
+  if (now - lastRender >= 100) { lastRender = now; render(); }
+}
+function startLoop() { if (loop) clearInterval(loop); loop = setInterval(step, P.tick); }
+
+async function startCamera() {
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: P.cam ? 'environment' : 'user', width: 640, height: 480 }, audio: false });
+    video.srcObject = stream; camOn = true; startCalibration();
+    try { if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { wake = l; }).catch(() => {}); } catch (e) {}
+  } catch (e) { flash('Не удалось включить камеру: ' + e.message + '. Нужен https и разрешение.'); }
+}
+btn.addEventListener('click', async () => {
+  if (!camOn) { await startCamera(); return; }
+  if (state !== 'run' || P.autoUp <= 0) return;
+  P.thr = Math.max(1, P.thr - P.autoUp); save(); syncSliders();
+  flash('Нажатие проскочило: порог снижен до ' + P.thr);
+});
+document.getElementById('gear').addEventListener('click', () => {
+  const p = document.getElementById('panel'); p.style.display = p.style.display === 'none' ? 'block' : 'none';
+});
+
+// ----- Панель -----
+const sliders = {}, zbars = {};
+function onParam(id) {
+  if (id === 'res') { init(); if (camOn) startCalibration(); }
+  else if (id === 'fg' || id === 'sigK') rebuildThr();
+  else if (id === 'tick') startLoop();
+  else if (id === 'edge') { EX = Math.max(1, Math.round(P.edge * W / 32)); EY = Math.max(1, Math.round(EX * 0.75)); }
+}
+function addSlider(parent, id, label, min, max, stepv) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = '<span class="lb">' + label + '</span><input type="range" min="' + min + '" max="' + max + '" step="' + stepv + '"><span class="val"></span>';
+  const inp = row.children[1], val = row.children[2];
+  inp.value = P[id]; val.textContent = P[id];
+  inp.oninput = () => { P[id] = parseFloat(inp.value); val.textContent = P[id]; onParam(id); save(); };
+  sliders[id] = [inp, val];
+  parent.appendChild(row);
+}
+function syncSliders() { for (const id in sliders) { sliders[id][0].value = P[id]; sliders[id][1].textContent = P[id]; } }
+function buildPanel() {
+  const body = document.getElementById('body');
+  const top = document.createElement('div'); top.className = 'row';
+  top.innerHTML = '<select id="cam"><option value="0">Фронтальная камера</option><option value="1">Задняя камера</option></select>' +
+    '<select id="mode"><option value="0">Макс + доля 2-го</option><option value="1">Только максимум</option><option value="2">Сумма</option><option value="3">Среднее</option></select>';
+  body.appendChild(top);
+  const cs = top.children[0], ms = top.children[1];
+  cs.value = P.cam; ms.value = P.mode;
+  cs.onchange = () => { P.cam = +cs.value; save(); if (camOn) startCamera(); };
+  ms.onchange = () => { P.mode = +ms.value; save(); };
+  const btns = document.createElement('div'); btns.className = 'row';
+  btns.innerHTML = '<button class="b" id="recal">Перекалибровать</button><button class="b" id="copy">Копировать настройки</button><button class="b" id="reset">Сбросить всё</button>';
+  body.appendChild(btns);
+  document.getElementById('recal').onclick = () => { if (camOn) startCalibration(); };
+  document.getElementById('copy').onclick = () => { try { navigator.clipboard.writeText(JSON.stringify(P)); flash('Настройки скопированы'); } catch (e) { flash('Копирование недоступно'); } };
+  document.getElementById('reset').onclick = () => { try { localStorage.removeItem('lab_v1'); } catch (e) {} location.reload(); };
+  const fd = document.createElement('details'); fd.open = true;
+  fd.innerHTML = '<summary>Методы (галочка — участвует в счёте)</summary>';
+  FEATS.forEach(([id, name, short, def, desc]) => {
+    const d = document.createElement('div'); d.className = 'feat';
+    d.innerHTML = '<input type="checkbox"><b>' + name + '</b><input type="range" min="0" max="3" step="0.1"><div class="zb"><i></i></div><small>' + desc + '</small>';
+    const cb = d.children[0], wt = d.children[2];
+    cb.checked = !!P['en_' + id]; wt.value = P['w_' + id];
+    cb.onchange = () => { P['en_' + id] = cb.checked ? 1 : 0; save(); };
+    wt.oninput = () => { P['w_' + id] = parseFloat(wt.value); save(); };
+    zbars[id] = d.querySelector('i');
+    fd.appendChild(d);
+  });
+  body.appendChild(fd);
+  const groups = {};
+  PARAMS.forEach(p => {
+    if (!groups[p[0]]) { const g = document.createElement('details'); g.innerHTML = '<summary>' + p[0] + '</summary>'; body.appendChild(g); groups[p[0]] = g; }
+    addSlider(groups[p[0]], p[1], p[2], p[3], p[4], p[5]);
+  });
+}
+function render() {
+  const now = performance.now(); let text;
+  if (!camOn) text = note || 'Нажми кнопку — включится камера';
+  else if (state === 'cal') {
+    const left = calStart ? Math.max(0, Math.ceil(P.calS - (now - calStart) / 1000)) : P.calS;
+    text = 'Калибровка: убери руки, не двигайся ещё ' + left + ' с';
+  } else {
+    text = (now < noteUntil ? note + '\n' : '') + 'Счёт ' + score.toFixed(1) + ' / порог ' + thrOn().toFixed(1) + ' · ' +
+      FEATS.filter(f => P['en_' + f[0]]).map(f => f[2] + ' ' + (zv[f[0]] || 0).toFixed(1)).join(' · ') + (hidden ? '\nпрячет: ' + holdName : '');
+  }
+  document.getElementById('status').textContent = text;
+  document.getElementById('fill').style.width = (state === 'run' ? Math.min(100, score / P.maxZ * 100) : 0) + '%';
+  document.getElementById('mark').style.left = Math.min(100, thrOn() / P.maxZ * 100) + '%';
+  for (const id in zbars) zbars[id].style.width = (state === 'run' ? Math.min(100, (zv[id] || 0) / P.maxZ * 100) : 0) + '%';
+}
+init(); buildPanel(); startLoop(); render();
+</script>
+</body>
+</html>
